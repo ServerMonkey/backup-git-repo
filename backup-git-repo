@@ -1,0 +1,193 @@
+#!/bin/sh
+#info: Backup Git repositories by cloning
+
+# global variables
+APP_BIN=$(basename "$0")
+
+# help
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "Backup multible Git repositories by cloning them."
+    echo "Automatic multicore compression."
+    echo ""
+    echo "Usage: Create a file with a list of repos that you want to backup:"
+    echo "With the naming scheme: <NAME_GROUP_NAME>/<PROJECT_NAME>"
+    echo "And save the file into your backup location:"
+    echo "  <BACKUP_PATH>/repos-to-checkout.txt"
+    echo "Make sure to run as a user that has the correct permissions to"
+    echo "use 'git clone' on all repos. Set it up via SSH keys."
+    echo "Then run:"
+    echo "  $APP_BIN <GIT_SERVER> <BACKUP_PATH> -d"
+    echo "Add '-d' to the end to make a dryrun and be verbose."
+    exit 0
+fi
+
+# must run as normal user
+if [ "$(id -u)" = 0 ]; then
+    echo 'This script must be run as a normal user, not root!' >&2
+    exit 1
+fi
+
+# check requirements
+if [ -z "$(command -v git)" ]; then
+    echo "git is not installed." >&2
+    exit 1
+fi
+if [ -z "$(command -v pigz)" ]; then
+    echo "pigz is not installed." >&2
+    exit 1
+fi
+if [ -z "$(command -v logger)" ]; then
+    echo "logger is not installed." >&2
+    exit 1
+fi
+if [ -z "$(command -v curl)" ]; then
+    echo "curl is not installed." >&2
+    exit 1
+fi
+
+# check input
+if [ -z "$1" ]; then
+    echo "You need to specify a git server" >&2
+    exit 1
+fi
+if [ -z "$2" ]; then
+    echo "You need to specify the backup path" >&2
+    exit 1
+fi
+if [ -n "$4" ]; then
+    echo "Too many parameters" >&2
+    exit 1
+fi
+
+# variables
+GIT_SERVER=$1
+BACKUP_PATH=$2
+EXTRAS=$3
+FILE_REPOS="repos-to-backup.txt"
+DATE=$(date -I)
+DIR_BACKUP=$DATE
+
+### FUNCTIONS ###
+error() {
+    echo "ERROR: $1" >&2
+    logger -t "$APP_BIN" "ERROR: $1"
+    exit 1
+}
+
+warn() {
+    echo "WARNING: $1" >&2
+    logger -t "$APP_BIN" "WARNING: $1"
+}
+
+info() {
+    if [ "$EXTRAS" = "-d" ]; then
+        echo "INFO: $1"
+        logger -t "$APP_BIN" "INFO: $1"
+    fi
+}
+
+### MAIN ###
+
+# go to backup folder
+cd "$BACKUP_PATH" >/dev/null 2>&1 || error "Path not found: $BACKUP_PATH"
+
+# check if FILE_REPOS exists
+if [ ! -f "$FILE_REPOS" ]; then
+    error "No config file found in $BACKUP_PATH/$FILE_REPOS"
+fi
+
+# create a new backup folder
+if [ -d "$DIR_BACKUP" ]; then
+    info "Backup folder '$DIR_BACKUP' already exists"
+fi
+if [ ! "$EXTRAS" = "-d" ]; then
+    mkdir -p "$DIR_BACKUP" || error "Can not create dir: $DIR_BACKUP"
+fi
+
+# test webserver
+WEBSTATUS=$(curl -k -Ls -w "%{http_code}\\n" "$GIT_SERVER" -o /dev/null)
+if [ "$WEBSTATUS" = "200" ]; then
+    info "OK: test webserver"
+else
+    error "Can not connect to git webserver, HTTP error $WEBSTATUS"
+fi
+
+# test git ssh config
+SSH_TEST=$(ssh -T "git@$GIT_SERVER")
+if echo "$SSH_TEST" | grep -q "Welcome to GitLab"; then
+    info "OK: test SSH"
+else
+    error "SSH test failed: $SSH_TEST"
+fi
+
+# clone for each repo in config file
+while read -r LINE; do
+    # ignore comments
+    if echo "$LINE" | grep -q '^#?*'; then
+        info "Ignore comment: '$LINE'"
+
+    # ignore empty lines
+    elif [ "$LINE" = "" ]; then
+        info "Ignore empty line"
+
+    # check if the line looks like a repo
+    elif echo "$LINE" | grep -q "/"; then
+        info "Looks like a repo: '$LINE'"
+
+        REPO_URL="$GIT_SERVER/$LINE"
+        REPO_NAME=$(echo "$LINE" | sed 's|/|--|g')
+        DIR_REPO="$DIR_BACKUP/$REPO_NAME"
+        CLONE_URL="git@$GIT_SERVER:$LINE"
+        BACKUP_FILE="$DIR_REPO.tar.gz"
+
+        # check if backup filesize is zero
+        if [ -f "$BACKUP_FILE" ] && [ ! -s "$BACKUP_FILE" ]; then
+            info "Removing failed (empty) backup: '$BACKUP_FILE'"
+            if [ ! "$EXTRAS" = "-d" ]; then
+                rm -rf "$BACKUP_FILE"
+                rm -rf "$DIR_REPO"
+            fi
+        fi
+
+        # validate git URL
+        git ls-remote "$CLONE_URL" >/dev/null 2>&1
+        GIT_TEST=$?
+        if [ "$GIT_TEST" -ne 0 ]; then
+            warn "Skipping, can not find repo: '$LINE'"
+        # clone repo
+        elif [ -f "$BACKUP_FILE" ]; then
+            info "Skipping, already in backup: '$LINE'"
+            if [ ! "$EXTRAS" = "-d" ]; then
+                rm -rf "$DIR_REPO"
+            fi
+        else
+            info "Trying 'git clone $CLONE_URL $DIR_REPO'"
+            if [ ! "$EXTRAS" = "-d" ]; then
+                rm -rf "$DIR_REPO"
+                git clone -q "$CLONE_URL" "$DIR_REPO" ||
+                    warn "git clone $REPO_URL $DIR_REPO failed"
+            else
+                logger -t "$APP_BIN" "DRYRUN: git clone -q $CLONE_URL $DIR_REPO"
+            fi
+            # multicore compress backup
+            info "Trying compressing to '$BACKUP_FILE'"
+            if [ ! "$EXTRAS" = "-d" ]; then
+                tar -cf "$BACKUP_FILE" -I pigz "$DIR_REPO" ||
+                    error "Compressing failed: $DIR_REPO"
+                # cleanup
+                rm -rf "$DIR_REPO"
+            fi
+        fi
+
+    else
+        warn "Skipping, does not look like a valid repo: '$LINE'"
+    fi
+
+    info ""
+
+done <"$FILE_REPOS"
+
+# done
+MSG_DONE="DONE: $GIT_SERVER $BACKUP_PATH"
+echo "$APP_BIN $MSG_DONE"
+logger -t "$APP_BIN" "$MSG_DONE"
