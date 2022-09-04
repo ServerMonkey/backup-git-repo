@@ -62,7 +62,7 @@ fi
 # variables
 GIT_SERVER=$1
 BACKUP_PATH=$2
-EXTRAS=$3
+DRYRUN=$3
 FILE_REPOS="repos-to-backup.txt"
 DATE=$(date -I)
 DIR_BACKUP=$DATE
@@ -80,7 +80,7 @@ warn() {
 }
 
 info() {
-    if [ "$EXTRAS" = "-d" ]; then
+    if [ "$DRYRUN" = "-d" ]; then
         echo "INFO: $1"
         logger -t "$APP_BIN" "INFO: $1"
     fi
@@ -100,7 +100,7 @@ fi
 if [ -d "$DIR_BACKUP" ]; then
     info "Backup folder '$DIR_BACKUP' already exists"
 fi
-if [ ! "$EXTRAS" = "-d" ]; then
+if [ ! "$DRYRUN" = "-d" ]; then
     mkdir -p "$DIR_BACKUP" || error "Can not create dir: $DIR_BACKUP"
 fi
 
@@ -143,7 +143,7 @@ while read -r LINE; do
         # check if backup filesize is zero
         if [ -f "$BACKUP_FILE" ] && [ ! -s "$BACKUP_FILE" ]; then
             info "Removing failed (empty) backup: '$BACKUP_FILE'"
-            if [ ! "$EXTRAS" = "-d" ]; then
+            if [ ! "$DRYRUN" = "-d" ]; then
                 rm -rf "$BACKUP_FILE"
                 rm -rf "$DIR_REPO"
             fi
@@ -157,12 +157,12 @@ while read -r LINE; do
         # clone repo
         elif [ -f "$BACKUP_FILE" ]; then
             info "Skipping, already in backup: '$LINE'"
-            if [ ! "$EXTRAS" = "-d" ]; then
+            if [ ! "$DRYRUN" = "-d" ]; then
                 rm -rf "$DIR_REPO"
             fi
         else
             info "Trying 'git clone $CLONE_URL $DIR_REPO'"
-            if [ ! "$EXTRAS" = "-d" ]; then
+            if [ ! "$DRYRUN" = "-d" ]; then
                 rm -rf "$DIR_REPO"
                 git clone -q "$CLONE_URL" "$DIR_REPO" ||
                     warn "git clone $REPO_URL $DIR_REPO failed"
@@ -171,7 +171,7 @@ while read -r LINE; do
             fi
             # multicore compress backup
             info "Trying compressing to '$BACKUP_FILE'"
-            if [ ! "$EXTRAS" = "-d" ]; then
+            if [ ! "$DRYRUN" = "-d" ]; then
                 tar -cf "$BACKUP_FILE" -I pigz "$DIR_REPO" ||
                     error "Compressing failed: $DIR_REPO"
                 # cleanup
@@ -189,5 +189,7 @@ done <"$FILE_REPOS"
 
 # done
 MSG_DONE="DONE: $GIT_SERVER $BACKUP_PATH"
-echo "$APP_BIN $MSG_DONE"
 logger -t "$APP_BIN" "$MSG_DONE"
+if [ "$DRYRUN" = "-d" ]; then
+    echo "$APP_BIN $MSG_DONE"
+fi
